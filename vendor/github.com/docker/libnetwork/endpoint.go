@@ -103,6 +103,7 @@ func (ep *endpoint) MarshalJSON() ([]byte, error) {
 	epMap["ingressPorts"] = ep.ingressPorts
 	epMap["svcAliases"] = ep.svcAliases
 	epMap["loadBalancer"] = ep.loadBalancer
+	epMap["serviceEnabled"] = ep.serviceEnabled
 
 	return json.Marshal(epMap)
 }
@@ -221,6 +222,10 @@ func (ep *endpoint) UnmarshalJSON(b []byte) (err error) {
 	var myAliases []string
 	json.Unmarshal(ma, &myAliases)
 	ep.myAliases = myAliases
+
+	if s, ok := epMap["serviceEnabled"]; ok {
+		ep.serviceEnabled = s.(bool)
+	}
 	return nil
 }
 
@@ -245,6 +250,7 @@ func (ep *endpoint) CopyTo(o datastore.KVObject) error {
 	dstEp.svcID = ep.svcID
 	dstEp.virtualIP = ep.virtualIP
 	dstEp.loadBalancer = ep.loadBalancer
+	dstEp.serviceEnabled = ep.serviceEnabled
 
 	dstEp.svcAliases = make([]string, len(ep.svcAliases))
 	copy(dstEp.svcAliases, ep.svcAliases)
@@ -311,16 +317,19 @@ func (ep *endpoint) isAnonymous() bool {
 	return ep.anonymous
 }
 
-// enableService sets ep's serviceEnabled to the passed value if it's not in the
-// current state and returns true; false otherwise.
-func (ep *endpoint) enableService(state bool) bool {
+// enableService sets ep's serviceEnabled to the passed value
+func (ep *endpoint) enableService(state bool) {
 	ep.Lock()
 	defer ep.Unlock()
-	if ep.serviceEnabled != state {
-		ep.serviceEnabled = state
-		return true
-	}
-	return false
+	ep.serviceEnabled = state
+}
+
+// isServiceEnabled checks if service is enabled for the
+// endpoint
+func (ep *endpoint) isServiceEnabled() bool {
+	ep.Lock()
+	defer ep.Unlock()
+	return ep.serviceEnabled
 }
 
 func (ep *endpoint) needResolver() bool {
@@ -750,6 +759,12 @@ func (ep *endpoint) sbLeave(sb *sandbox, force bool, options ...EndpointOption) 
 		logrus.Warnf("Could not cleanup network resources on container %s disconnect: %v", ep.name, err)
 	}
 
+	if ep.serviceEnabled {
+		if e := ep.deleteServiceInfoFromCluster(sb, "sbLeave"); e != nil {
+			logrus.Warnf("delete of service state for endpoint %s from cluster: %v failed", ep.Name(), e)
+		}
+		ep.enableService(false)
+	}
 	// Update the store about the sandbox detach only after we
 	// have completed sb.clearNetworkresources above to avoid
 	// spurious logs when cleaning up the sandbox when the daemon
@@ -757,10 +772,6 @@ func (ep *endpoint) sbLeave(sb *sandbox, force bool, options ...EndpointOption) 
 	// detach but after store has been updated.
 	if err := n.getController().updateToStore(ep); err != nil {
 		return err
-	}
-
-	if e := ep.deleteServiceInfoFromCluster(sb, "sbLeave"); e != nil {
-		logrus.Errorf("Could not delete service state for endpoint %s from cluster: %v", ep.Name(), e)
 	}
 
 	if e := ep.deleteDriverInfoFromCluster(); e != nil {
